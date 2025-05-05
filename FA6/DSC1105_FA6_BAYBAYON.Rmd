@@ -1,0 +1,260 @@
+---
+title: "DSC1105 | FA 6"
+author: "Baybayon, Darlyn Antoinette B."
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(dplyr)
+  library(readr)
+  library(ggplot2)
+  library(glmnet)
+  library(nnet)
+  library(caret)
+  library(cowplot)
+  library(broom)
+  library(psych)
+  library(VGAM)
+})
+
+```
+
+### Data Exploration
+
+**The dataset and variables**
+
+```{r}
+data <- read_csv("customer_segmentation.csv", show_col_types = FALSE)
+head(data)
+glimpse(data)
+```
+The dataset contains customer segmentation information based on purchasing behavior. The goal of this project is to predict which customer segment a new customer would belong to given their demographic and behavioral data.
+
+The dataset has 10,352 observations and 8 columns: \
+
+- Customer ID (unique identifier
+- Age (continuous)
+- Annual Income (continuous: in thousands of $)
+- Gender (categorical: male/female)
+- Product Category Purchased (categorical: electronics, fashion, home, books, others)
+- Average Spend per Visit (continuous: in $)
+- No. of Visits in Last 6 Months (discrete)
+- Customer Segment (categorical, target: Budget shopper, Regular shopper, Premum shopper)
+
+
+Visualization
+
+```{r}
+plot_grid(
+  ggplot(data, aes(x=Age)) + geom_histogram(binwidth = 10),
+  ggplot(data, aes(x=`Annual Income (K$)`)) + geom_histogram(binwidth = 10),
+  ggplot(data, aes(x= `Average Spend per Visit ($)`)) + geom_histogram(binwidth = 20),
+  ncol=2
+)
+
+```
+
+
+Check missing values
+```{r}
+sapply(data, function(x) sum(is.na(x)))
+```
+Distribution of Customer Segment
+```{r, fig.width=6, fig.height=3.5}
+ggplot(data, aes(x=`Customer Segment`)) + geom_bar()
+```
+
+### Data Preprocessing
+
+Encode the Gender and Product Category Purchased columns using appropriate encoding methods (e.g., One-Hot Encoding for the product category, Label Encoding for gender).
+
+Scale continuous variables like Age, Annual Income, and Average Spend per Visit using StandardScaler or MinMaxScaler.
+```{r}
+
+data_clean <- data %>%
+  select(-`Customer ID`) %>%
+  mutate(
+    Gender = factor(as.numeric(factor(Gender))),
+    `Product Category Purchased` = factor(as.numeric(factor(`Product Category Purchased`))),
+    `Customer Segment` = factor(`Customer Segment`,
+                                levels = c("Budget Shopper", "Regular Shopper", "Premium Shopper"),
+                                labels = c(1, 2, 3)),
+    across(c(Age, `Average Spend per Visit ($)`, `Annual Income (K$)`, `Number of Visits in Last 6 Months`), scale)
+    
+  )
+
+data_clean
+```
+
+Split the dataset into training and testing sets 
+
+```{r}
+set.seed(123)
+
+n <- nrow(data_clean)
+train_samples <- sample(1:n, round(0.8*n))
+
+data_train <- data_clean[train_samples, ]
+data_test <- data_clean[-train_samples, ]
+
+```
+
+
+### Model Building
+
+```{r}
+
+mlr_model <- vglm(`Customer Segment` ~ .,
+                  family = multinomial,
+                  data = data_train)
+summary(mlr_model)
+
+```
+
+Significant predictors (p < 0.05)
+(Intercept):1 (B = 0.166, p = 0.009)
+`Product Category Purchased`3:1 (B = -0.283, p = 0.001)
+`Product Category Purchased`4:1 (B = -0.180, p = 0.032)
+
+Marginally significant predictors (p < 0.1)
+`Product Category Purchased`2:1 (B = -0.145, p = 0.086)
+`Product Category Purchased`5:1 (B = -0.141, p = 0.087)
+
+
+These results suggest that Product Category has the strongest impact in differentiating Customer Segments compared to other features. Those who purchased Category 3 (Fashion) are significantly less likely to be in Segment 1 (Budget Shopper).
+
+
+```{r}
+predicted <- predict(mlr_model, newdata = data_test, type = "response")
+predicted_classes <- factor(colnames(predicted)[apply(predicted, 1, which.max)])
+
+actual <- factor(data_test$`Customer Segment`)
+cf <- confusionMatrix(actual, predicted_classes)
+cf$table
+
+accuracy <- cf$overall["Accuracy"]
+precision <- cf$byClass[,"Specificity"]
+recall <- cf$byClass[,"Sensitivity"]
+f1_score <- cf$byClass[,"F1"]
+
+data.frame(
+  Metric = c("Accuracy", "Precision", "Recall", "F-1 Score"),
+  Value = c(accuracy, mean(precision), mean(recall), mean(f1_score))
+)
+
+```
+Tune hyperparameters like regularization strength (C) using cross-validation.
+
+```{r}
+train_control <- trainControl(method = "cv", number = 5)
+tune_grid <- expand.grid(
+  alpha = c(0, 1),
+  lambda = 10^seq(-3, 1, length.out = 10) 
+)
+
+cv_model <- train(`Customer Segment` ~., data = data_train, 
+               method = "glmnet",
+               family = "multinomial",
+               trControl = train_control,
+               tuneGrid = tune_grid
+               )
+plot(cv_model)
+cv_model$bestTune
+
+predict_tuned <- predict(cv_model, newdata = data_test)
+
+```
+
+
+### Model Evaluation
+
+```{r}
+
+cf <- confusionMatrix(actual, predict_tuned)
+cf$table
+
+accuracy <- cf$overall["Accuracy"]
+precision <- cf$byClass[,"Specificity"]
+recall <- cf$byClass[,"Sensitivity"]
+f1_score <- cf$byClass[,"F1"]
+
+data.frame(
+  Metric = c("Accuracy", "Precision", "Recall", "F-1 Score"),
+  Value = c(accuracy, mean(precision), mean(recall), mean(f1_score))
+)
+
+```
+
+```{r}
+coef(cv_model$finalModel, s=cv_model$bestTune$lambda)
+
+```
+
+
+### Refinement
+
+Try to improve the model by adding interaction features (e.g., combining Annual Income and Age), or by tuning the hyperparameters further.
+
+
+```{r}
+cv_model_refined <- train(`Customer Segment` ~ Age + Gender + `Average Spend per Visit ($)`+
+                             `Annual Income (K$)`+ `Number of Visits in Last 6 Months` + 
+                             `Product Category Purchased` + `Age`:`Annual Income (K$)`,
+                  data = data_train,
+                  method = "glmnet",
+                  family = "multinomial",
+                  trControl = train_control,
+                  tuneGrid = tune_grid)
+
+plot(cv_model_refined)
+cv_model_refined$bestTune
+
+predict_refined <- predict(cv_model_refined, newdata = data_test)
+
+```
+
+
+```{r}
+cf_refined <- confusionMatrix(actual, predict_refined)
+cf_refined$table
+
+accuracy <- cf_refined$overall["Accuracy"]
+precision <- cf_refined$byClass[,"Specificity"]
+recall <- cf_refined$byClass[,"Sensitivity"]
+f1_score <- cf_refined$byClass[,"F1"]
+
+data.frame(
+  Metric = c("Accuracy", "Precision", "Recall", "F-1 Score"),
+  Value = c(accuracy, mean(precision), mean(recall), mean(f1_score))
+)
+```
+```{r}
+coef(cv_model_refined$finalModel, s=cv_model_refined$bestTune$lambda)
+```
+
+Customer Segment 1 (Budget Shoppers) are least likely to spend on Category 3 (Fashion). Higher Annual Income slightly affects their probability to be classified here.
+
+Customer Segment 2 (Regular Shoppers) are less likely to be Gender 2 (Male) and high spender per visit and more likely to spend on Category 5 (others).
+
+Customer Segment 3 (Premium Shoppers) are more positively associated with Category 3 (Fashion).
+
+
+### Reporting
+
+
+A multinomial logistic regression model was trained to predict Customer Segment based on Age, Gender, Average Spend per Visit (\$), Annual Income (K\$), Number of Visits in Last 6 Months, and Product Category Purchased. 
+
+The initial model found Product Category Purchased to be the strongest factor in predicting Customer Segments. In particular, the results suggest that those who purchased from Category 3 (Fashion) are significantly less likely to be classified as Segment 1 (Budget Shopper). This model reported an accuracy of 0.3281, precision 0.6654, recall, and f-1 score of 0.321. 
+
+The model was refined by adding interaction features (Annual Income and Age) and running a 5-fold cross-validation to tune the hyperparameters to reach optimal performance. A grid search was conducted to determine the best regularization method (0 = ridge, 1 = lasso) and regularization strength. The final model also determine Product Categories to be the more significant feature for classifying Customer Segments. This model reported an accuracy of 0.3234, precision of 0.6634, recall	0.3211, and f-1 score of 0.3111. The initial model reported slightly better performance metrics even after some refinements. 
+
+
+In conclusion, most of the features did not exhibit a strong influence on Customer Segmentation. To improve this model, using other predictors may yield better results.
+
+
