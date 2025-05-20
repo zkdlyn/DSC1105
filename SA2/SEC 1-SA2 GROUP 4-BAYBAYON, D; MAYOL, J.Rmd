@@ -1,0 +1,326 @@
+---
+output: github_document
+---
+
+### Analyzing Reproductive Health and Behavior Patterns Using NSFG 2022–2023
+
+Submitted by:
+
+Baybayon, Darlyn Antoinette B.
+
+Mayol, Jose Raphael J.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(dplyr)
+  library(readr)
+  library(ggplot2)
+  library(caret)
+  library(glmnet)
+  library(cowplot)
+  library(psych)
+  library(vcd)
+  library(AER)
+  library(splines)
+  library(MASS)
+  library(VGAM)
+  library(pscl)
+})
+
+```
+
+### Dataset
+
+```{r}
+FemRespData <- read_csv("NSFG_2022_2023_FemRespPUFData.csv", guess_max = Inf,show_col_types = FALSE)
+head(FemRespData)
+```
+
+The dataset was retrieved from the 2022-2023 NSFG Public use data files on Female respondents.
+
+### Variable Selection
+
+```{r}
+FemRespDataSelect <- FemRespData %>%
+  dplyr::select(AGER, RSCRRACE, HHKIDS18, FMARITAL, HIEDUC, GENHEALT, LIFPRTNR, CONSTAT1, PREGNUM, ASKSMOKE, DRINK12)
+
+head(FemRespDataSelect)
+```
+
+The raw dataset had 5,586 observations and 1,912 variables. The following variables were selected for this analysis:
+
+-   AGER - Respondent's age at interview
+
+-   RSCRRACE - Respondent's race as reported in screener
+
+-   HHKIDS18 - No. of children \< 19 years in household
+
+-   FMARITAL - Formal (legal) marital status relative to opposite-sex spouses
+
+-   HIEDUC - Highest completed year of school or highest degree received
+
+-   LIFPRTNR - No. of opposite-sex sexual partners in lifetime
+
+-   GENHEALT - Respondent's general health
+
+-   CONSTAT1 - Current contraceptive status (1st priority)
+
+-   PREGNUM - Total no. of pregnancies
+
+-   ASKSMOKE - Asked Respondent whether they smoke cigarettes or other tobacco
+
+-   DRINK12 - How often drank alcoholic beverages in the last 12 mos.
+
+The variables were chosen from questions applicable to all respondents to get meaningful insights and generalizations. The variables are to provide insights on the respondents' demographics, behavior, and health data.
+
+### Data Cleaning
+
+Handle missing values and recode variable data types
+
+```{r}
+summarise_all(FemRespDataSelect, ~sum(is.na(.)))
+
+```
+
+```{r}
+data_clean <- FemRespDataSelect %>%
+  mutate(
+    GENHEALT = if_else(is.na(GENHEALT), median(GENHEALT, na.rm= TRUE), GENHEALT),
+    GENHEALT = if_else(GENHEALT %in% c(8, 9), median(GENHEALT, na.rm= TRUE), GENHEALT),
+    DRINK12 = if_else(is.na(DRINK12), median(DRINK12, na.rm= TRUE), DRINK12),
+    DRINK12 = if_else(DRINK12 %in% c(8, 9), median(DRINK12, na.rm= TRUE), DRINK12),
+    ASKSMOKE = if_else(ASKSMOKE %in% c(8, 9), median(ASKSMOKE, na.rm= TRUE), ASKSMOKE),
+    CONSTAT1 = case_when(
+      CONSTAT1 %in% c(1, 2, 35) ~ "Surgical Sterilization",
+      CONSTAT1 %in% c(3, 10) ~ "LARC",
+      CONSTAT1 %in% c(5, 6, 7, 8) ~ "Hormonal Methods",
+      CONSTAT1 %in% c(11, 12, 13) ~ "Barrier Methods",
+      CONSTAT1 == 9 ~ "Emergency Contraception",
+      CONSTAT1 %in% c(19, 20, 21) ~ "Natural Methods",
+      CONSTAT1 == 22 ~ "Others",
+      CONSTAT1 %in% c(30, 31, 32, 40, 41, 42) ~ "Non-users",
+      CONSTAT1 %in% c(33, 34, 38) ~ "Sterile",
+      TRUE ~ "Other"),
+    across(c(RSCRRACE, HIEDUC, FMARITAL, GENHEALT, CONSTAT1, ASKSMOKE,DRINK12), as.factor),
+    CONSTAT1 = factor(as.numeric(CONSTAT1))
+    )%>%
+  drop_na()
+
+  
+data_clean
+
+```
+
+```{r}
+summarise_all(data_clean, ~sum(is.na(.)))
+```
+
+Splitting dataset
+
+```{r}
+set.seed(123)
+
+n <- nrow(data_clean)
+train_samples <- sample(1:n, round(0.8*n))
+
+data_train <- data_clean[train_samples, ]
+data_test <- data_clean[-train_samples, ]
+```
+
+### Statistical Analyses
+
+#### Poisson Regression
+
+```{r}
+poisson_model <- glm(LIFPRTNR ~ log(AGER) + ASKSMOKE + DRINK12 + HHKIDS18 
+                     +HIEDUC + PREGNUM, family=poisson,
+                     data = data_train)
+
+summary(poisson_model)
+```
+
+A poisson regression model was build to predict the number of opposite-sex sexual partners in lifetime (LIFPRTNR) using demographic and behavioral data (age, education, smoking, alcohol, pregnancy, and no. of kids.). Age, more frequent alcohol consumption, higher educational attainment, and pregnancy are associated positively with the number of opposite-sex sexual partners reported in a lifetime. The number of kids 18 and below in household and not smoking are associated with lower partner counts
+
+##### Assumption Checks
+
+1.  Count Variable
+
+    -   **Assumption**: The dependent variable is a **count** (non-negative integers: 0, 1, 2, ...).
+    -   **Remark**: The dependent variable, LIFPRTNR, is a count variable
+
+2.  Independence of observations
+
+    -   **Assumption**: The observations are independent of each other.
+    -   **Remark**: Each row in the dataset represents a unique respondent.
+
+3.  Equidispersion
+
+    -   **Assumption**: The mean and variance of the outcome are equal
+
+    ```{r}
+    cat("Mean:", mean(data_clean$LIFPRTNR))
+    cat("\nVar:", var(data_clean$LIFPRTNR))
+    dispersiontest(poisson_model)
+    ```
+
+    -   **Remark**: The mean and variance are not equal with variance being much greater than the mean. Overdispersion is observed
+
+4.  Linearity
+
+    -   **Assumption**: Linear relationship between the predictors and the log of the expected count
+
+    ```{r}
+    plot(poisson_model, which =1)
+
+    ```
+
+    -   **Remark**: By inspection of the Residuals vs. Fitted plot, this assumption is violated.
+
+5.  No multicollinearity among predictors
+
+    -   **Assumption**: Predictors should not be highly correlated
+
+    ```{r}
+    vif(poisson_model)
+    ```
+
+    -   **Remark**: No VIF \> 5, no predictors are highly correlated.
+
+6.  No Outliers
+
+    ```{r}
+    plot(poisson_model, which=5)
+    ```
+
+The poisson model failed the assumptions for linearity and equidispersion and showed high level of overdispersion.
+
+```{r}
+negbinom_model <- glm.nb(LIFPRTNR ~ log(AGER) + ASKSMOKE + DRINK12 + HHKIDS18 
+                     +HIEDUC + PREGNUM, 
+                     data = data_train)
+summary(negbinom_model)
+```
+
+#### Contingency Tables
+
+##### Contingency Table
+
+```{r}
+contable <- structable(CONSTAT1 ~ FMARITAL, data = data_clean)
+contable
+chisq.test(contable, correct = FALSE)
+
+```
+
+There is a statistically significant association between contraceptive method (CONSTAT1) and marital status (FMARITAL) (p\<0.05). The high X-squared value imply a strong association.
+
+```{r}
+mosaic(~FMARITAL + CONSTAT1, data = data_clean, gp=shading_max)
+```
+
+#### Categorical Response Modeling
+
+##### Ordinal Logistic Regression
+
+```{r}
+olr_model <- polr(GENHEALT ~ AGER +DRINK12 + ASKSMOKE + PREGNUM, data = data_train, Hess = TRUE)
+
+summary(olr_model)
+```
+
+```{r}
+pR2(olr_model)["McFadden"]
+```
+
+Odds Ratios
+
+```{r}
+exp(coef(olr_model))
+```
+
+##### Multinomial Logistic Regression
+
+```{r}
+mlr_models <- vglm(FMARITAL ~ PREGNUM +AGER +LIFPRTNR,
+                  family = multinomial,
+                  data = data_train)
+
+summary(mlr_models)
+```
+
+Odds Ratios
+
+```{r}
+exp(coef(mlr_models))
+```
+
+Model Fit
+
+```{r}
+actual <- factor(data_test$FMARITAL)
+predicted_probs <- predict(mlr_models, data_test, type = "response")
+predicted_classes <- factor(colnames(predicted_probs)[apply(predicted_probs, 1, which.max)], levels = levels(actual))
+
+
+cf <- confusionMatrix(actual, predicted_classes)
+cf
+
+```
+
+```{r}
+accuracy <- cf$overall["Accuracy"]
+precision <- cf$byClass[,"Specificity"]
+recall <- cf$byClass[,"Sensitivity"]
+f1_score <- cf$byClass[,"F1"]
+
+data.frame(
+  Metric = c("Accuracy", "Precision", "Recall", "F-1 Score"),
+  Value = c(accuracy, mean(precision), mean(recall), mean(f1_score))
+)
+
+cf
+```
+
+#### EDA and Multiple Comparisons
+
+Explore the dataset using histograms, bar charts, and boxplots.
+
+```{r}
+ggplot(data_clean, aes(x = RSCRRACE, y = PREGNUM)) +
+  geom_boxplot(aes(fill=RSCRRACE)) +
+  labs(x = "Race", y = "Number of Pregnancies")
+
+ggplot(data_clean, aes(x=PREGNUM)) +geom_histogram(binwidth = 1, fill="green")
+
+ggplot(data_clean, aes(x=RSCRRACE)) + geom_bar(aes(fill=RSCRRACE))
+
+```
+
+Conduct multiple tests (e.g., comparing pregnancy outcomes across ethnic groups) and adjust p-values using Bonferroni or False Discovery Rate (FDR) methods.
+
+```{r}
+# pregnancy and race
+race_aov <- lm(PREGNUM~RSCRRACE, data=data_clean)
+anova(race_aov)
+```
+
+```{r}
+pairwise.t.test(data_clean$PREGNUM, data_clean$RSCRRACE, p.adjust.method ="bonferroni")
+```
+
+```{r}
+pairwise.t.test(data_clean$PREGNUM, data_clean$RSCRRACE, p.adjust.method ="fdr")
+```
+
+Discuss risks of Type I error and how adjustments affect conclusions.
+
+Performing multiple tests increases the probability of incorrectly rejecting true null hypotheses (Type I error) due to multiple comparisons. To mitigate this, p-values may be adjusted using Bonferroni or False Discovery Rate (FDR) methods.
+
+Bonferroni method adjusts the p-values by multiplying them by the number of comparisons. This is a conservative method which reduces Type I errors but increases Type II errors (false negatives).
+
+FDR adjusts p-values to control the expected proportion of false positives among the significant results, offering a more balanced approach that maintains higher statistical power.
